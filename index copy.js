@@ -190,8 +190,7 @@ class SignallingServer {
     // Endpoint to set the answer variable
     app.post("/set-answer", (req, res) => {
       const { value } = req.body;
-      const { sdp, type } = value;
-      this.answer;
+      this.answer = value;
       res.send(`Answer set to: ${this.answer}`);
     });
 

@@ -1,15 +1,24 @@
 const express = require("express");
-const { isEqual } = require("lodash");
 const { Observable } = require("rxjs");
-
+const isEqual = require("lodash/isEqual");
+/**
+ * This is the signalling server i created, now it does seem to working according to my tests with postman, although i dont really get http with the dart client
+ * so please check
+ */
 class SignallingServer {
   constructor(port) {
     this.app = express();
     this.port = port || 3000;
 
-    this.iceCandidatesMap = new Map();
-    this.answersMap = new Map();
-    this.offersMap = new Map();
+    this.iceCandidates = new Map(); // Map keyed by userId
+    this.answers = new Map(); // Map keyed by userId
+    this.offer = new Map(); // Map keyed by userId
+
+    this.iceCandidatesSubscriptions = new Map();
+    this.answerSubscriptions = new Map();
+    this.offerSubscriptions = new Map();
+
+    this.nextClientId = 0;
 
     this.setupRoutes();
   }
@@ -20,16 +29,18 @@ class SignallingServer {
     // Middleware to parse JSON body
     app.use(express.json());
 
-    // Function to create a subscribable stream for ICE candidates array
+    // Function to create a subscribable stream for the iceCandidates map
     const createIceCandidatesChangeStream = (userId) => {
-      let lastCandidateIndex = this.iceCandidatesMap.get(userId)?.length || 0;
+      let lastCandidateIndex = this.iceCandidates.get(userId)
+        ? this.iceCandidates.get(userId).length
+        : 0;
 
       return new Observable((subscriber) => {
         const checkArrayChange = () => {
-          const iceCandidates = this.iceCandidatesMap.get(userId) || [];
-          if (iceCandidates.length > lastCandidateIndex) {
-            const newCandidate = iceCandidates[lastCandidateIndex];
-            lastCandidateIndex = iceCandidates.length;
+          const candidates = this.iceCandidates.get(userId) || [];
+          if (candidates.length > lastCandidateIndex) {
+            const newCandidate = candidates[lastCandidateIndex];
+            lastCandidateIndex = candidates.length;
             subscriber.next(newCandidate); // Emit the new candidate
           }
         };
@@ -40,15 +51,15 @@ class SignallingServer {
       });
     };
 
-    // Function to create a subscribable stream for the answer variable
+    // Function to create a subscribable stream for the answer map
     const createAnswerChangeStream = (userId) => {
-      let currentAnswer = this.answersMap.get(userId);
+      let currentAnswer = this.answers.get(userId) || "";
 
       return new Observable((subscriber) => {
         const checkAnswerChange = () => {
-          const newAnswer = this.answersMap.get(userId);
-          if (!isEqual(newAnswer, currentAnswer)) {
-            currentAnswer = newAnswer;
+          const answer = this.answers.get(userId) || "";
+          if (answer !== currentAnswer) {
+            currentAnswer = answer;
             subscriber.next(currentAnswer); // Emit the new answer
           }
         };
@@ -59,15 +70,15 @@ class SignallingServer {
       });
     };
 
-    // Function to create a subscribable stream for the offer variable
+    // Function to create a subscribable stream for the offer map
     const createOfferChangeStream = (userId) => {
-      let currentOffer = this.offersMap.get(userId);
+      let currentOffer = this.offer.get(userId) || "";
 
       return new Observable((subscriber) => {
         const checkOfferChange = () => {
-          const newOffer = this.offersMap.get(userId);
-          if (isEqual(newOffer, currentOffer)) {
-            currentOffer = newOffer;
+          const offer = this.offer.get(userId) || "";
+          if (offer !== currentOffer) {
+            currentOffer = offer;
             subscriber.next(currentOffer); // Emit the new offer
           }
         };
@@ -78,9 +89,10 @@ class SignallingServer {
       });
     };
 
-    // SSE endpoint for clients to subscribe to ICE candidates changes
-    app.get("/subscribe-iceCandidates/", (req, res) => {
-      const { userId } = req.query;
+    // SSE endpoint for clients to subscribe to iceCandidates changes
+    app.get("/subscribe-iceCandidates/:userId", (req, res) => {
+      const { userId } = req.params;
+
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
@@ -88,8 +100,8 @@ class SignallingServer {
 
       const iceCandidatesChangeStream = createIceCandidatesChangeStream(userId);
       const subscription = iceCandidatesChangeStream.subscribe({
-        next: (newCandidate) => {
-          res.write(`data: ${JSON.stringify(newCandidate)}\n\n`);
+        next: (newArray) => {
+          res.write(`data: ${JSON.stringify(newArray)}\n\n`);
         },
         error: (err) => {
           console.error("Error:", err);
@@ -100,15 +112,19 @@ class SignallingServer {
         },
       });
 
+      this.iceCandidatesSubscriptions.set(subscription, userId);
+
       req.on("close", () => {
         subscription.unsubscribe();
+        this.iceCandidatesSubscriptions.delete(subscription);
         res.end();
       });
     });
 
     // SSE endpoint for clients to subscribe to answer changes
-    app.get("/subscribe-answer/", (req, res) => {
-      const { userId } = req.query;
+    app.get("/subscribe-answer/:userId", (req, res) => {
+      const { userId } = req.params;
+
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
@@ -128,15 +144,19 @@ class SignallingServer {
         },
       });
 
+      this.answerSubscriptions.set(subscription, userId);
+
       req.on("close", () => {
         subscription.unsubscribe();
+        this.answerSubscriptions.delete(subscription);
         res.end();
       });
     });
 
     // SSE endpoint for clients to subscribe to offer changes
-    app.get("/subscribe-offer/", (req, res) => {
-      const { userId } = req.query;
+    app.get("/subscribe-offer/:userId", (req, res) => {
+      const { userId } = req.params;
+
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
@@ -156,8 +176,11 @@ class SignallingServer {
         },
       });
 
+      this.offerSubscriptions.set(subscription, userId);
+
       req.on("close", () => {
         subscription.unsubscribe();
+        this.offerSubscriptions.delete(subscription);
         res.end();
       });
     });
@@ -168,15 +191,12 @@ class SignallingServer {
       const { value } = req.body; // Expecting a map with keys candidate, sdpMid, sdpMLineIndex
       const { candidate, sdpMid, sdpMLineIndex } = value;
 
-      if (!this.iceCandidatesMap.has(userId)) {
-        this.iceCandidatesMap.set(userId, []);
+      if (!this.iceCandidates.has(userId)) {
+        this.iceCandidates.set(userId, []);
       }
-
-      this.iceCandidatesMap
-        .get(userId)
-        .push({ candidate, sdpMid, sdpMLineIndex });
+      this.iceCandidates.get(userId).push({ candidate, sdpMid, sdpMLineIndex });
       res.send(
-        `ICE candidate added for user ${userId}: ${JSON.stringify({
+        `Ice candidate added: ${JSON.stringify({
           candidate,
           sdpMid,
           sdpMLineIndex,
@@ -188,26 +208,16 @@ class SignallingServer {
     app.post("/set-answer/:userId", (req, res) => {
       const { userId } = req.params;
       const { value } = req.body;
-      const { sdp, type } = value;
-      this.answersMap.set(userId, { sdp, type });
-      res.send(
-        `Answer set for user ${userId}: ${JSON.stringify(
-          this.answersMap.get(userId)
-        )}`
-      );
+      this.answers.set(userId, value);
+      res.send(`Answer set to: ${this.answers.get(userId)}`);
     });
 
     // Endpoint to set the offer variable
     app.post("/set-offer/:userId", (req, res) => {
       const { userId } = req.params;
       const { value } = req.body;
-      const { sdp, type } = value;
-      this.offersMap.set(userId, { sdp, type });
-      res.send(
-        `Offer set for user ${userId}: ${JSON.stringify(
-          this.offersMap.get(userId)
-        )}`
-      );
+      this.offer.set(userId, value);
+      res.send(`Offer set to: ${this.offer.get(userId)}`);
     });
 
     // Default route
